@@ -37,7 +37,6 @@ while True:
                     print(data)
 
                     iou_list = [item['iou'] for item in data]
-                    iou_list = list(filter(None, iou_list))
                     latency_list = [item['current_frame'] - item['detection_id'] for item in data]
                     # dead frame number
                     dead_frames = len(data) - len(iou_list)
