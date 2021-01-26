@@ -304,7 +304,7 @@ class workers_packet_manager(Base):
                     iou = self.bb_intersection_over_union(incoming_data, detection)
 
                 else:
-                    iou = None
+                    iou = 0
 
                 data = {
                     'current_frame': incoming,
