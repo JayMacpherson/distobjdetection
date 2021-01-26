@@ -9,6 +9,9 @@ from pickle import loads, dumps
 from queue import PriorityQueue
 from time import perf_counter
 from copy import deepcopy
+from time import sleep, time
+from threading import Thread
+import json
 
 # global variables
 zenith_inventor_stack = [[], []]
@@ -17,14 +20,9 @@ drone_worker = Queue()
 worker_admin = Queue()
 admin_drone = Queue()
 
-lossy_encoding_threshold = 0.3
-max_frame_per_time = 5
-reply_time_threshold = 5
-unstable_disconnection_count = 3
-inconsistent_disconnection_count = 6
-classification_time = 3
-class_seq = {'satisfy': 1, 'poor': 6}
-
+worker_tolerance = 3
+frame_wait_tolerance = 2
+class_seq = {'Satisfactory': 2, 'Poor': 3}
 
 class Base(Process):
     """
@@ -35,13 +33,35 @@ class Base(Process):
                  address,
                  _drone_worker=None,
                  _worker_admin=None,
-                 _admin_drone=None
+                 _admin_drone=None,
+                 _stream_tolerance=0.2
                  ):
         super().__init__()
         self.address = address
         self._drone_worker = _drone_worker
         self._worker_admin = _worker_admin
         self._admin_drone = _admin_drone
+        self.connections = None
+        self.workers = None
+        self.incoming_stack = []
+        self.colliding_agents = {}
+        self.stream_tolerance = _stream_tolerance
+
+
+class File:
+    def __init__(self, filename: str):
+        self.filename = filename
+        try:
+            self.read = open(f'{self.filename}.crp', 'rb')
+            self.data = loads(self.read.read())
+        except FileNotFoundError:
+            with open(f'{self.filename}.crp', 'wb') as file:
+                file.write(pickle.dumps({}))
+            self.data = {}
+
+    def save(self):
+        with open(f'{self.filename}.crp', 'wb') as file:
+            file.write(dumps(self.data))
 
 
 def serialize(list_, entry=0):
@@ -57,18 +77,6 @@ def serialize(list_, entry=0):
 def extract_valid(data):
     msg, type_, shape, image, feedback = serialize(data)
     return msg, feedback
-
-
-def get_workers():
-    if not os.path.exists('worker_log.crp'):
-        with open('worker_log.crp', 'wb') as _file_:
-            _file_.write(dumps({}))
-            return {}
-    else:
-        with open('worker_log.crp', 'rb') as _file_:
-            workers = loads(_file_.read())
-            print(workers)
-            return workers
 
 
 def extract_frame_from_tensor(data_):
@@ -108,139 +116,27 @@ def prepare_frame_tensor(frame, text: str, raw: bool = False):
 class Drones_packet_manager(Base):
 
     def run(self):
-
         ctx = zmq.Context()
         drone_sock = ctx.socket(zmq.REP)
         drone_sock.bind(self.address)
 
         cursor = 0
-        proceed_stream = False
 
         while True:
             data = drone_sock.recv()
 
-            piled_frame = self._drone_worker.qsize()
-            if piled_frame > max_frame_per_time:
-                drop = piled_frame - max_frame_per_time
-                for _ in range(drop):
-                    try:
-                        self.remove(self._drone_worker.get())
-                    except:
-                        pass
+            self.store(cursor, data)
+            self._drone_worker.put([cursor, time()])
 
-            if proceed_stream:
-                self.store(f'{cursor}drone', data)
-                self._drone_worker.put(f'{cursor}drone')
-
-                cursor += 1
-            else:
-                if not self._admin_drone.empty():
-                    proceed_stream = True
+            cursor += 1
 
             drone_sock.send(b"None")
 
     @staticmethod
     def store(serial, data: bytes):
-
         with open(f'file_array/{serial}', 'wb') as file:
             file.write(data)
         return
-
-    @staticmethod
-    def remove(serial: int):
-        os.remove(f'file_array/{serial}')
-
-
-class admin_packet_manager(Base):
-
-    def run(self):
-
-        ctx = zmq.Context()
-        admin_sock = ctx.socket(zmq.REP)
-        admin_sock.bind(self.address)
-        self.cursor = 0
-
-        proceed_stream = False
-        dropped = 0
-
-        last_frame_time = perf_counter()
-        backlog = PriorityQueue()
-        time_threshold = 0.05
-
-        while True:
-            _ = admin_sock.recv()
-
-            if not proceed_stream:
-                self._admin_drone.put(True)
-                proceed_stream = True
-
-            if not self._worker_admin.empty():
-
-                params = self._worker_admin.get()
-
-                frame_id = params['frame_id']
-                params['worker']['dropped_frames'] = 0
-
-                if frame_id > self.cursor + 1:
-                    # stores the frame temp
-                    backlog.put((params['frame_id'], params))
-
-                    if (perf_counter() - last_frame_time) > time_threshold:
-                        new_frame = backlog.get()[1]
-                        new_id = new_frame['frame_id']
-                        dropped += (new_id - (self.cursor + 1))
-
-                        self.pack_send(new_frame, dropped, admin_sock)
-
-                        dropped = 0
-                        # updating the counter
-                        last_frame_time = perf_counter()
-                    else:
-                        admin_sock.send(b'None')
-                        continue
-
-                elif frame_id == self.cursor + 1:
-                    self.cursor = frame_id
-                    self.pack_send(params, dropped, admin_sock)
-                    dropped = 0
-                    last_frame_time = perf_counter()
-
-                else:
-                    # this can only happen when a frame comes really late
-                    # and it is to be forgotten but does not update the cursor
-                    admin_sock.send(b'None')
-                    self.remove(frame_id)
-                    last_frame_time = perf_counter()
-
-            else:
-                admin_sock.send(b'None')
-
-    @staticmethod
-    def get(serial: int):
-
-        with open(f'file_array/{serial}', 'rb') as file:
-            data = file.read()
-
-        return serialize(data)
-
-    def pack_send(self, frame, dropped, admin_client):
-        # getting data from file
-        data = self.get(frame['frame_id'])
-
-        frame['worker']['dropped_frames'] = dropped
-
-        # serializing data
-        data = serialize({
-            'detection_data': frame['detection_data'],
-            'raw_frame': data,
-            'worker': frame['worker']},
-            entry=1
-        )
-
-        admin_client.send(data)
-
-        self.cursor = frame['frame_id']
-        self.remove(self.cursor)
 
     @staticmethod
     def remove(serial: int):
@@ -254,211 +150,223 @@ class workers_packet_manager(Base):
         ctx = zmq.Context()
         worker_sock = ctx.socket(zmq.REP)
         worker_sock.bind(self.address)
+        self.workers = File('worker_log')
+        self.connections = {}
 
-        self.workers = get_workers()
-        self.workers_data = {}
-        self.connection = {}
+        arriving_cursor = -1
+        awaiting = PriorityQueue()
+        waiting_countdown = perf_counter()
+        dropped_counter = 0
 
-        worker_log = []
-        cursor = 0
+        thread = Thread(target=self.connection_clock, daemon=True)
+        thread.start()
+
+
 
         while True:
-            data = worker_sock.recv()
-            data = loads(data)
-            status = ''
+            # unloading to stack
+            for _ in range(self._drone_worker.qsize()):
+                self.incoming_stack.append(self._drone_worker.get())
 
-            entry = data.get('entry', None)
-            worker_id = data.get('id', None)
+            data = pickle.loads(worker_sock.recv())
+            user_id = data['user_id']
+            username = data['username']
 
-            if entry and worker_id:
-                if entry == 'connect':
-                    status = self.classify_worker(worker_id, False)
-                    data = b'None'
-                elif entry == 'none':
-                    data = b'None'
-                else:
-                    status = self.classify_worker(worker_id, True)
-                    data = data.get('data')
+            if user_id not in self.workers.data.keys():
+                self.workers.data[user_id] = 0
+                worker_status = 'Excellent'
+            else:
+                worker_status = self.manage_workers(user_id)
 
-                if data != b'None':
-                    data = serialize(data)
+            if worker_status != 'Poor':
+                if data['content']:
+                    awaiting.put((data['serial'], data))
 
-                    worker_name = data[3]
-                    speed = data[1]
-                    frame_id = data[0]
-                    detection_data = data[2]
+                if self.incoming_stack:
+                    new_data_cursor = self.incoming_stack.pop(0)
 
-                    worker_log = {
-                        'worker_name': worker_name,
-                        'worker_speed': speed,
-                        'lossy_encoding': False,
-                        'status': status
-                    }
+                    if not awaiting.empty():
+                        first = awaiting.get()
+                        present_incoming = None
+                        inspecting_packet = new_data_cursor if not self.incoming_stack else self.incoming_stack[-1]
+                        #  figuring out if the latest incoming packet from drone is new or not
+                        print(self.stream_tolerance)
+                        if (time() - inspecting_packet[1]) < self.stream_tolerance:
+                            present_incoming = inspecting_packet[0]
 
-                    if data[1] > lossy_encoding_threshold:
-                        if worker_log:
-                            worker_log['lossy_encoding'] = True
+                        if present_incoming is not None:
+                            if first[0] > arriving_cursor:
+                                if (perf_counter() - waiting_countdown) > frame_wait_tolerance:
+                                    waiting_countdown = perf_counter()
+                                    arriving_cursor = first[0] + 1
+                                    self.calculate_accuracy_difference(present_incoming, first[1])
+                                else:
+                                    awaiting.put(first)
 
-                    self._worker_admin.put({
-                        'frame_id': frame_id,
-                        'detection_data': detection_data,
-                        'worker': worker_log
-                    })
+                            elif first[0] == arriving_cursor:
+                                waiting_countdown = perf_counter()
+                                arriving_cursor += 1
+                                self.calculate_accuracy_difference(present_incoming, first[1])
+                            else:
+                                dropped_counter += 1
+                                print(f'{dropped_counter}: total dropped')
 
-                if not self._drone_worker.empty():
-
-                    serial = self._drone_worker.get()
-                    _data = self.get(serial)
-
-                    os.rename(f'file_array/{serial}', f'file_array/{cursor}')
-                    serial = cursor
-                    cursor += 1
-
-                    if data[1] > lossy_encoding_threshold:
-                        _data = self.lossy_encoding(_data)
-
-                        if worker_log:
-                            worker_log['lossy_encoding'] = True
-
-                    worker_sock.send(serialize([serial, _data], entry=1))
-                    # update worker inspector
-                    # identity = None if data == b'None' else data[4]
-                    # status = self.worker_inspector(identity)
-                    #
-                    # if status != 'Inconsistent':
-                    #     worker_sock.send(serialize([serial, _data, status], entry=1))
-                    # else:
-                    #     worker_sock.send(serialize([b'None', b'None', status], entry=1))
+                    new_data_cursor = new_data_cursor[0]
 
                 else:
-                    worker_sock.send(b'None')
+                    new_data_cursor = None
+
+                if user_id not in self.connections.keys():
+                    print(f'{username} came online')
+                    self.connections[user_id] = [7, 7, username,
+                                                 new_data_cursor]  # 4 is the max second excepted for a worker to reply
+                    # while 5 is the countdown sec
+
+                else:
+                    connect_data = self.connections[user_id]
+
+                    if data['content']:
+                        max_sec = max([data['speed'] + worker_tolerance, connect_data[1]])
+                        max_sec = data['speed'] + worker_tolerance if max_sec == 4 else max_sec
+                    else:
+                        max_sec = connect_data[1]
+
+                    self.connections[user_id] = [max_sec, max_sec, username, new_data_cursor]
+
+                if new_data_cursor is not None:
+                    data = self.get(new_data_cursor)
+                else:
+                    data = b'None'
             else:
-                worker_sock.send(b'None')
+                new_data_cursor = None
+                data = b'None'
 
-    def classify_worker(self, worker_id, valid_data: bool):
-        if worker_id in self.workers_data.keys():
-            worker = self.workers_data[worker_id]
-
-            if perf_counter() - worker['last_updated'] > classification_time*60:
-                worker['disconnections'] = 0
-                worker['last_updated'] = perf_counter()
-
-            if not valid_data:
-                worker['disconnections'] += 1
-
-            count = worker['disconnections']
-
-            if count > class_seq['poor']:
-                return 'Poor'
-            elif count > class_seq['satisfy']:
-                return 'Satisfactory'
-            else:
-                return 'Excellent'
-
-        else:
-            self.workers_data[worker_id] = {
-                'disconnections': 0,
-                'last_updated': perf_counter()
+            data = {
+                'status': worker_status,
+                'data': data,
+                'serial': new_data_cursor
             }
+
+            worker_sock.send(pickle.dumps(data))
+
+    def connection_clock(self):
+        while True:
+            try:
+                sleep(.1)
+                for user_id, data in self.connections.items():
+                    countdown = data[0] - 0.1
+                    if countdown < 0:
+                        if data[3] is not None:
+                            print(f'{data[2]}: missed the deadline')
+
+                            crimes = self.workers.data[user_id]
+                            self.workers.data[user_id] = crimes + 1
+                            self.workers.save()
+                        else:
+                            print(f'{data[2]}: went offline')
+
+                        del self.connections[user_id]
+                    else:
+                        self.connections[user_id] = [countdown, data[1], data[2], data[3]]
+            except RuntimeError:
+                continue
+
+    def manage_workers(self, user_id):
+        crimes = self.workers.data[user_id]
+
+        if crimes > class_seq['Poor']:
+            return 'Poor'
+        elif crimes > class_seq['Satisfactory']:
+            return 'Satisfactory'
+        else:
             return 'Excellent'
 
+    def calculate_accuracy_difference(self, incoming, arrived):
+        incoming_data = pickle.loads(self.get(incoming))
+        origination = arrived['origination']
+
+        # checking if origination colliding detections co-respond
+        if incoming_data['origination'] == origination:
+            if not os.path.exists(origination[0]):
+                os.mkdir(origination[0])
+
+            if origination[1] not in self.colliding_agents.keys():
+                self.colliding_agents[origination[1]] = []
+
+            if arrived['new_result']:
+                detection = None
+                for item in arrived['new_result']:
+                    if item[-1].lower() in origination[1]:
+                        detection = item[0]
+                        break
+                incoming_data = [int(item) for item in incoming_data['result'].split(',')]
+                if detection:
+                    iou = self.bb_intersection_over_union(incoming_data, detection)
+
+                else:
+                    iou = None
+
+                data = {
+                    'current_frame': incoming,
+                    'groundtruth': incoming_data,
+                    'detection_id': arrived['serial'],
+                    'result': detection,
+                    'iou': iou
+                }
+
+                self.colliding_agents[origination[1]].append(data)
+
+                with open(f'{origination[0]}/{origination[1]}.json', 'wb') as file:
+                    file.write(pickle.dumps(self.colliding_agents[origination[1]]))
+
+                print(f'{incoming} -> {arrived["serial"]}')
+
     @staticmethod
-    def lossy_encoding(data):
-        # msg, frame = extract_frame_from_tensor(data)
+    def bb_intersection_over_union(boxA, boxB):
+        # determine the (x, y)-coordinates of the intersection rectangle
+        # box A coordinates
+        Ax1 = boxA[0]
+        Ay1 = boxA[1]
+        Ax2 = boxA[0] + boxA[2]
+        Ay2 = boxA[1] + boxA[3]
+        Aw = boxA[2]
+        Ah = boxA[3]
 
-        # reducing frame quality by half
-        # frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
-        #
-        # data = prepare_frame_tensor(frame, msg)
-        return data
+        # box B coordinates
+        Bx1 = boxB[0]
+        By1 = boxB[1]
+        Bx2 = boxB[0] + boxB[2]
+        By2 = boxB[1] + boxB[3]
+        Bw = boxB[2]
+        Bh = boxB[3]
 
-    def worker_inspector(self, identity):
-        if identity:
-            old = deepcopy(self.workers)
-            if identity not in self.workers.keys():
-                status = 0
-                self.workers[identity] = status
-            else:
-                status = self.workers[identity]
+        left = max(Ax1, Bx1)
+        right = min(Ax2, Bx2)
+        bottom = min(Ay2, By2)
+        top = max(Ay1, By1)
 
-            for _identity_, last_updated in self.connection.items():
-                if (perf_counter() - last_updated) > reply_time_threshold:
-                    self.workers[_identity_] += 1
-                    if identity == _identity_:
-                        status += 1
+        # compute the intersection over union IOU
 
-            self.connection[identity] = perf_counter()
+        if (left < right) and (top < bottom):
+            boxAArea = Aw * Ah
+            boxBArea = Bw * Bh
+            interArea = (right - left) * (bottom - top)
+            iou = interArea / float(boxAArea + boxBArea - interArea)
+            return iou
 
-            if old != self.workers:
-                with open('worker_log.crp', 'wb') as _file_:
-                    _file_.write(dumps(self.workers))
-
-            if status > inconsistent_disconnection_count:
-                _status_ = 'Inconsistent'
-            elif status > unstable_disconnection_count:
-                _status_ = 'Unstable'
-            else:
-                _status_ = 'Stable'
-
-            return _status_
         else:
-            return 'None'
+            return 0
 
     @staticmethod
     def get(serial: int):
-
         with open(f'file_array/{serial}', 'rb') as file:
             data = file.read()
 
         return data
 
 
-class drone_admin(Base):
-    def run(self):
-        global zenith_inventor_stack
-
-        ctx = zmq.Context()
-        admin_sock = ctx.socket(zmq.REP)
-        admin_sock.bind(self.address)
-
-        while True:
-            data = admin_sock.recv()
-            msg, feedback = extract_valid(data)
-
-            if msg == 'Detector':
-
-                if feedback:
-                    # queues if detected frames comes back  from detector
-                    zenith_inventor_stack[1] += [data]
-
-                # checks if there is frame in the queue
-                if zenith_inventor_stack[0]:
-
-                    # sends frame to detector
-                    admin_sock.send(zenith_inventor_stack[0][0])
-
-                    # de-queues
-                    del zenith_inventor_stack[0][0]
-                else:
-                    # sends none to detector if no frames are available in queue
-                    admin_sock.send(b'None')
-            # this is for FS
-            else:
-                # queues frame in stack for detector to use
-                zenith_inventor_stack[0] += [data]
-
-                # checks if there is return detected frames from detector
-                if zenith_inventor_stack[1]:
-                    # sends detected frames to FS
-                    admin_sock.send(zenith_inventor_stack[1][0])
-                    # de-queues
-                    del zenith_inventor_stack[1][0]
-                else:
-                    # sends None if no detected frames are available
-                    admin_sock.send(b'None')
-
-
 if __name__ == '__main__':
+
     try:
         print('[INFO] Cleaning directory...')
         shutil.rmtree('file_array')
@@ -467,19 +375,12 @@ if __name__ == '__main__':
     except:
         os.mkdir('file_array')
 
-    ZI = drone_admin("tcp://*:4001")
-    ZI.start()
-    AD = admin_packet_manager(
-        "tcp://*:4022",
-        _worker_admin=worker_admin,
-        _admin_drone=admin_drone
-    )
-
-    AD.start()
+    stream_tolerance = float(input("stream tolerance ") or 0.2)
     WM = workers_packet_manager(
         "tcp://*:4033",
         _drone_worker=drone_worker,
-        _worker_admin=worker_admin
+        _worker_admin=worker_admin,
+        _stream_tolerance=stream_tolerance
     )
 
     WM.start()
@@ -492,4 +393,4 @@ if __name__ == '__main__':
     DM.start()
     print('Edge Server Active')
 
-    AD.join()
+    DM.join()
