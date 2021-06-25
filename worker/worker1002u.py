@@ -6,12 +6,14 @@ import OD
 from random import randint
 from time import perf_counter, sleep
 import os
-from random import randint
 from pickle import loads, dumps
 from PIL import Image
+import schedule
 
-default_latency = 0
-identity = 1001
+scheduled_time = 15
+chance = 25
+sleep_amount = 10
+identity = 2002
 
 socket = zmq.Context()
 socket = socket.socket(zmq.REQ)
@@ -38,6 +40,21 @@ class File:
 
 def pre_launch(force: bool = False):
     global identity
+
+    answer = None
+    while answer not in ("y", "n"):
+        answer = input("Do you want to mess with default deadlines y/n: ")
+        if answer == "y":
+            global scheduled_time
+            global chance
+            global sleep_amount
+            scheduled_time = int(input('Select schedule in seconds '))
+            chance = int(input('Select probability of sleep (1 - 100) '))
+            sleep_amount = int(input('Select duration of sleep in seconds '))
+        elif answer == "n":
+            break
+        else:
+            print("Please enter y or n.")
 
     if not os.path.exists(f'log_{identity}.crp') or force:
         username = input('Input your username: ')
@@ -71,6 +88,14 @@ def pre_launch(force: bool = False):
             return file
 
 
+def scheduled_sleep():
+    roll = randint(1, 100)
+    if roll <= chance:
+        print('sleeping')
+        sleep(sleep_amount)
+        print('awake')
+
+
 user = pre_launch()
 _id_ = user.data['id']
 _username_ = user.data['username']
@@ -78,7 +103,10 @@ _status_ = user.data['status']
 
 print('[INFO] Worker is Active...')
 
+schedule.every(scheduled_time).seconds.do(scheduled_sleep)
+
 while True:
+    schedule.run_pending()
     if data == b'None':
         data = dumps({
             'username': _username_,
@@ -113,7 +141,6 @@ while True:
         # actual detection
         time = perf_counter()
         frame_detection = detector.detection(frame_byte, None)
-        sleep(default_latency)
         speed = perf_counter() - time
 
         scaled_detections = []

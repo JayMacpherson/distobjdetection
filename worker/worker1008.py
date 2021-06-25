@@ -11,11 +11,11 @@ from pickle import loads, dumps
 from PIL import Image
 
 default_latency = 0
-identity = 1001
+identity = 1008
 
 socket = zmq.Context()
 socket = socket.socket(zmq.REQ)
-socket.connect("tcp://10.123.1.60:4033")
+socket.connect("tcp://localhost:4033")
 data = b'None'
 
 print('[INFO] Loading detector...')

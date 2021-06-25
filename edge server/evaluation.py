@@ -1,6 +1,13 @@
 import pickle
 from _pickle import UnpicklingError
 import os
+import csv
+
+# field names
+fields = ['Stream_frame_id', 'IOU']
+
+# name of csv file
+filename = "results_IOU.csv"
 
 
 def choose(_list_: list) -> str:
@@ -34,14 +41,23 @@ while True:
             try:
                 with open(path, 'rb') as file:
                     data = pickle.loads(file.read())
-                    print(data)
-
+                    rows = [[item['current_frame'], item['iou']] for item in data]
                     iou_list = [item['iou'] for item in data]
                     latency_list = [item['current_frame'] - item['detection_id'] for item in data]
-                    # dead frame number
-                    dead_frames = len(data) - len(iou_list)
+                    dead_frames = [x["result"] for x in data].count(None)
                     average_latency = sum(latency_list) / len(latency_list)
                     average_iou = sum(iou_list) / len(iou_list)
+
+
+                    with open(filename, 'w') as csvfile:
+                        # creating a csv writer object
+                        csvwriter = csv.writer(csvfile)
+
+                        # writing the fields
+                        csvwriter.writerow(fields)
+
+                        # writing the data rows
+                        csvwriter.writerows(rows)
 
                     print(f'Average IOU, deadframes, latency is {average_iou, dead_frames, average_latency}')
                 exit()

@@ -11,7 +11,7 @@ from pickle import loads, dumps
 from PIL import Image
 
 default_latency = 0
-identity = 1001
+identity = 2004
 
 socket = zmq.Context()
 socket = socket.socket(zmq.REQ)

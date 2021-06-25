@@ -10,10 +10,11 @@ from pickle import loads, dumps
 from PIL import Image
 import schedule
 
-scheduled_time = 15
+scheduled_time = 10
 chance = 25
 sleep_amount = 10
-identity = 100101
+identity = 1001
+sleep_counter = 0
 
 socket = zmq.Context()
 socket = socket.socket(zmq.REQ)
@@ -45,12 +46,8 @@ def pre_launch(force: bool = False):
     while answer not in ("y", "n"):
         answer = input("Do you want to mess with default deadlines y/n: ")
         if answer == "y":
-            global scheduled_time
             global chance
-            global sleep_amount
-            scheduled_time = int(input('Select schedule in seconds '))
             chance = int(input('Select probability of sleep (1 - 100) '))
-            sleep_amount = int(input('Select duration of sleep in seconds '))
         elif answer == "n":
             break
         else:
@@ -91,9 +88,13 @@ def pre_launch(force: bool = False):
 def scheduled_sleep():
     roll = randint(1, 100)
     if roll <= chance:
+        global sleep_counter
+        sleep_counter = sleep_counter + 1
+        total_slept = sleep_counter * 10
         print('sleeping')
         sleep(sleep_amount)
         print('awake')
+        print('This worker has slept {} times for a total of {} seconds'.format(sleep_counter, total_slept))
 
 
 user = pre_launch()

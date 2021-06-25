@@ -46,6 +46,7 @@ class Base(Process):
         self.incoming_stack = []
         self.colliding_agents = {}
         self.stream_tolerance = _stream_tolerance
+        self.total_iou = []  # total number of iou
 
 
 class File:
@@ -190,7 +191,6 @@ class workers_packet_manager(Base):
                         present_incoming = None
                         inspecting_packet = new_data_cursor if not self.incoming_stack else self.incoming_stack[-1]
                         #  figuring out if the latest incoming packet from drone is new or not
-                        print(self.stream_tolerance)
                         if (time() - inspecting_packet[1]) < self.stream_tolerance:
                             present_incoming = inspecting_packet[0]
 
@@ -320,9 +320,13 @@ class workers_packet_manager(Base):
                     file.write(pickle.dumps(self.colliding_agents[origination[1]]))
 
                 print(f'{incoming} -> {arrived["serial"]}')
+                print(f'{iou}')
+                self.total_iou.append(iou)
+                if self.total_iou:
+                    print('Average IOU', sum(self.total_iou) / len(self.total_iou))
 
-    @staticmethod
-    def bb_intersection_over_union(boxA, boxB):
+
+    def bb_intersection_over_union(self,boxA, boxB):
         # determine the (x, y)-coordinates of the intersection rectangle
         # box A coordinates
         Ax1 = boxA[0]
@@ -352,6 +356,7 @@ class workers_packet_manager(Base):
             boxBArea = Bw * Bh
             interArea = (right - left) * (bottom - top)
             iou = interArea / float(boxAArea + boxBArea - interArea)
+
             return iou
 
         else:
